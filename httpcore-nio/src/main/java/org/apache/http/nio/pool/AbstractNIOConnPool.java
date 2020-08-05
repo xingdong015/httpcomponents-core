@@ -26,41 +26,23 @@
  */
 package org.apache.http.nio.pool;
 
-import java.io.IOException;
-import java.net.SocketAddress;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.ListIterator;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
-
 import org.apache.http.annotation.Contract;
 import org.apache.http.annotation.ThreadingBehavior;
 import org.apache.http.concurrent.BasicFuture;
 import org.apache.http.concurrent.FutureCallback;
-import org.apache.http.nio.reactor.ConnectingIOReactor;
-import org.apache.http.nio.reactor.IOReactorStatus;
-import org.apache.http.nio.reactor.IOSession;
-import org.apache.http.nio.reactor.SessionRequest;
-import org.apache.http.nio.reactor.SessionRequestCallback;
-import org.apache.http.pool.ConnPool;
-import org.apache.http.pool.ConnPoolControl;
-import org.apache.http.pool.PoolEntry;
-import org.apache.http.pool.PoolEntryCallback;
-import org.apache.http.pool.PoolStats;
+import org.apache.http.nio.reactor.*;
+import org.apache.http.pool.*;
 import org.apache.http.util.Args;
 import org.apache.http.util.Asserts;
 import org.apache.http.util.LangUtils;
+
+import java.io.IOException;
+import java.net.SocketAddress;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Abstract non-blocking connection pool.
@@ -74,22 +56,35 @@ import org.apache.http.util.LangUtils;
 @Contract(threading = ThreadingBehavior.SAFE_CONDITIONAL)
 public abstract class AbstractNIOConnPool<T, C, E extends PoolEntry<T, C>>
                                                   implements ConnPool<T, E>, ConnPoolControl<T> {
-
+    // 一个可复用的ioreactor, 负责生成SessionRequest并唤醒selector去做连接到目标网站的操作
     private final ConnectingIOReactor ioReactor;
+    // 用来构造连接池的entry的工厂
     private final NIOConnFactory<T, C> connFactory;
+    // 验证并生成目标连接socketAddress的类
     private final SocketAddressResolver<T> addressResolver;
+    // 一个可复用的callBack类, 里面提供了一个调用SessionRequest的complete的方法
     private final SessionRequestCallback sessionRequestCallback;
+    // 用域名区分的连接池
     private final Map<T, RouteSpecificPool<T, C, E>> routeToPool;
+    // 没有成功拿到连接的请求列表
     private final LinkedList<LeaseRequest<T, C, E>> leasingRequests;
+    // 已经拿到连接权利, 但是还没连接成功的连接集合
     private final Set<SessionRequest> pending;
+    // 已经连接成功, 并被租借出去的连接集合
     private final Set<E> leased;
+    // 当前连接池可用的连接集合
     private final LinkedList<E> available;
+    // 已经连接完成, 但是不可用的连接集合, 例如因为异常连接失败等待, 他们会在队列中等待被调用回调方法做后续处理
     private final ConcurrentLinkedQueue<LeaseRequest<T, C, E>> completedRequests;
+    // 每个route的最大连接数
     private final Map<T, Integer> maxPerRoute;
+    // 锁对象
     private final Lock lock;
     private final AtomicBoolean isShutDown;
 
+    // 每个route最大连接数默认值
     private volatile int defaultMaxPerRoute;
+    // 整个连接池最大连接数
     private volatile int maxTotal;
 
     /**
